@@ -1,15 +1,17 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useRef, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { 
+import {
   MessageCircle,
   X,
   Send,
   Bot,
   User,
   Minimize2,
-  Maximize2
+  Maximize2,
+  Mic,
+  MicOff,
 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { GoogleGenerativeAI } from "@google/generative-ai";
@@ -31,33 +33,113 @@ const AIGuide = () => {
   const navigate = useNavigate();
   const [isOpen, setIsOpen] = useState(false);
   const [isMinimized, setIsMinimized] = useState(false);
+  const [isListening, setIsListening] = useState(false);
+  const [speechSupported, setSpeechSupported] = useState(false);
+  const recognitionRef = useRef<SpeechRecognition | null>(null);
 
   const isConfigured = useMemo(() => !!apiKey, []);
 
   const [messages, setMessages] = useState<Message[]>([
     {
-      id: '1',
-      text: isConfigured 
-        ? "Hi! I'm your AI assistant, powered by Gemini. How can I help you today?"
+      id: "1",
+      text: isConfigured
+        ? "Hi! I'm your AI assistant, powered by Gemini. How can I help you today? You can type or use the microphone to speak!"
         : "The AI chatbot is not configured. Please add the VITE_GEMINI_API_KEY to your .env file.",
       isUser: false,
-      timestamp: new Date()
-    }
+      timestamp: new Date(),
+    },
   ]);
   const [inputText, setInputText] = useState("");
   const [isLoading, setIsLoading] = useState(false);
 
-  const handleSendMessage = async () => {
-    if (!inputText.trim() || !genAI) return;
+  // Initialize speech recognition
+  useEffect(() => {
+    if ("webkitSpeechRecognition" in window || "SpeechRecognition" in window) {
+      setSpeechSupported(true);
+      const SpeechRecognition =
+        window.SpeechRecognition || window.webkitSpeechRecognition;
+      recognitionRef.current = new SpeechRecognition();
+
+      if (recognitionRef.current) {
+        recognitionRef.current.continuous = false;
+        recognitionRef.current.interimResults = false;
+        recognitionRef.current.lang = "en-US";
+
+        recognitionRef.current.onstart = () => {
+          setIsListening(true);
+        };
+
+        recognitionRef.current.onresult = (event) => {
+          const transcript = event.results[0][0].transcript;
+          setInputText(transcript);
+          // Automatically send the message after getting the transcript
+          setTimeout(() => {
+            handleSendMessage(transcript);
+          }, 100);
+        };
+
+        recognitionRef.current.onerror = (event) => {
+          console.error("Speech recognition error:", event.error);
+          setIsListening(false);
+
+          // Show error message to user
+          const errorMessage: Message = {
+            id: Date.now().toString(),
+            text: `Speech recognition error: ${event.error}. Please try again or type your message.`,
+            isUser: false,
+            timestamp: new Date(),
+          };
+          setMessages((prev) => [...prev, errorMessage]);
+        };
+
+        recognitionRef.current.onend = () => {
+          setIsListening(false);
+        };
+      }
+    }
+
+    return () => {
+      if (recognitionRef.current) {
+        recognitionRef.current.abort();
+      }
+    };
+  }, []);
+
+  const startListening = () => {
+    if (recognitionRef.current && !isListening) {
+      try {
+        recognitionRef.current.start();
+      } catch (error) {
+        console.error("Error starting speech recognition:", error);
+        const errorMessage: Message = {
+          id: Date.now().toString(),
+          text: "Could not start speech recognition. Please check your microphone permissions.",
+          isUser: false,
+          timestamp: new Date(),
+        };
+        setMessages((prev) => [...prev, errorMessage]);
+      }
+    }
+  };
+
+  const stopListening = () => {
+    if (recognitionRef.current && isListening) {
+      recognitionRef.current.stop();
+    }
+  };
+
+  const handleSendMessage = async (messageText?: string) => {
+    const textToSend = messageText || inputText;
+    if (!textToSend.trim() || !genAI) return;
 
     const userMessage: Message = {
       id: Date.now().toString(),
-      text: inputText,
+      text: textToSend,
       isUser: true,
-      timestamp: new Date()
+      timestamp: new Date(),
     };
 
-    setMessages(prev => [...prev, userMessage]);
+    setMessages((prev) => [...prev, userMessage]);
     setInputText("");
     setIsLoading(true);
 
@@ -74,18 +156,21 @@ const AIGuide = () => {
       const prompt = `You are a helpful assistant for a fencing contractor app. Your goal is to help users.
       The available pages are: dashboard, quotes, customers, schedule, and settings.
       Based on the user's question, provide a response in JSON format. The object should have one of two keys: "navigation" (e.g., "/quotes") or "text" for a helpful response.
-      User question: "${inputText}"`;
+      User question: "${textToSend}"`;
 
       const result = await model.generateContent(prompt);
       const response = await result.response;
       const text = response.text();
-      
+
       const parsedResponse = JSON.parse(text);
-      
+
       let aiResponse = "I'm not sure how to help with that. Please try again.";
 
       if (parsedResponse.navigation) {
-        aiResponse = `Sure, taking you to the ${parsedResponse.navigation.replace('/', '')} page.`;
+        aiResponse = `Sure, taking you to the ${parsedResponse.navigation.replace(
+          "/",
+          ""
+        )} page.`;
         setTimeout(() => navigate(parsedResponse.navigation), 1500);
       } else if (parsedResponse.text) {
         aiResponse = parsedResponse.text;
@@ -95,26 +180,25 @@ const AIGuide = () => {
         id: (Date.now() + 1).toString(),
         text: aiResponse,
         isUser: false,
-        timestamp: new Date()
+        timestamp: new Date(),
       };
-      setMessages(prev => [...prev, aiMessage]);
-
+      setMessages((prev) => [...prev, aiMessage]);
     } catch (error) {
-      console.error('AI Guide error:', error);
+      console.error("AI Guide error:", error);
       const errorMessage: Message = {
         id: (Date.now() + 1).toString(),
         text: "I'm having trouble processing your request right now. Please try again or navigate manually using the sidebar.",
         isUser: false,
-        timestamp: new Date()
+        timestamp: new Date(),
       };
-      setMessages(prev => [...prev, errorMessage]);
+      setMessages((prev) => [...prev, errorMessage]);
     }
 
     setIsLoading(false);
   };
 
   const handleKeyPress = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
+    if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       handleSendMessage();
     }
@@ -141,6 +225,12 @@ const AIGuide = () => {
         <div className="flex items-center space-x-2">
           <Bot className="w-4 lg:w-5 h-4 lg:h-5" />
           <span className="font-semibold text-sm lg:text-base">AI Chatbot</span>
+          {isListening && (
+            <div className="flex items-center space-x-1">
+              <div className="w-2 h-2 bg-red-400 rounded-full animate-pulse"></div>
+              <span className="text-xs">Listening...</span>
+            </div>
+          )}
         </div>
         <div className="flex items-center space-x-1 lg:space-x-2">
           <Button
@@ -149,7 +239,11 @@ const AIGuide = () => {
             onClick={() => setIsMinimized(!isMinimized)}
             className="text-white hover:bg-white/20 p-1"
           >
-            {isMinimized ? <Maximize2 className="w-3 lg:w-4 h-3 lg:h-4" /> : <Minimize2 className="w-3 lg:w-4 h-3 lg:h-4" />}
+            {isMinimized ? (
+              <Maximize2 className="w-3 lg:w-4 h-3 lg:h-4" />
+            ) : (
+              <Minimize2 className="w-3 lg:w-4 h-3 lg:h-4" />
+            )}
           </Button>
           <Button
             variant="ghost"
@@ -170,7 +264,7 @@ const AIGuide = () => {
               <div
                 key={message.id}
                 className={`flex items-start space-x-2 ${
-                  message.isUser ? 'justify-end' : 'justify-start'
+                  message.isUser ? "justify-end" : "justify-start"
                 }`}
               >
                 {!message.isUser && (
@@ -181,11 +275,13 @@ const AIGuide = () => {
                 <div
                   className={`max-w-[70%] p-2 lg:p-3 rounded-lg ${
                     message.isUser
-                      ? 'bg-blue-600 text-white'
-                      : 'bg-gray-100 text-gray-800'
+                      ? "bg-blue-600 text-white"
+                      : "bg-gray-100 text-gray-800"
                   }`}
                 >
-                  <p className="text-xs lg:text-sm whitespace-pre-line">{message.text}</p>
+                  <p className="text-xs lg:text-sm whitespace-pre-line">
+                    {message.text}
+                  </p>
                 </div>
                 {message.isUser && (
                   <div className="w-6 lg:w-8 h-6 lg:h-8 rounded-full bg-gray-300 flex items-center justify-center flex-shrink-0">
@@ -202,8 +298,14 @@ const AIGuide = () => {
                 <div className="bg-gray-100 p-2 lg:p-3 rounded-lg">
                   <div className="flex space-x-1">
                     <div className="w-2 h-2 bg-gray-400 rounded-full animate-pulse"></div>
-                    <div className="w-2 h-2 bg-gray-400 rounded-full animate-pulse" style={{ animationDelay: '0.2s' }}></div>
-                    <div className="w-2 h-2 bg-gray-400 rounded-full animate-pulse" style={{ animationDelay: '0.4s' }}></div>
+                    <div
+                      className="w-2 h-2 bg-gray-400 rounded-full animate-pulse"
+                      style={{ animationDelay: "0.2s" }}
+                    ></div>
+                    <div
+                      className="w-2 h-2 bg-gray-400 rounded-full animate-pulse"
+                      style={{ animationDelay: "0.4s" }}
+                    ></div>
                   </div>
                 </div>
               </div>
@@ -217,24 +319,120 @@ const AIGuide = () => {
                 value={inputText}
                 onChange={(e) => setInputText(e.target.value)}
                 onKeyPress={handleKeyPress}
-                placeholder={isConfigured ? "Ask me anything..." : "Chatbot not configured"}
+                placeholder={
+                  isConfigured
+                    ? isListening
+                      ? "Listening..."
+                      : "Ask me anything..."
+                    : "Chatbot not configured"
+                }
                 className="flex-1 text-sm"
-                disabled={isLoading || !isConfigured}
+                disabled={isLoading || !isConfigured || isListening}
               />
+
+              {/* Microphone Button */}
+              {speechSupported && (
+                <Button
+                  onClick={isListening ? stopListening : startListening}
+                  disabled={isLoading || !isConfigured}
+                  className={`${
+                    isListening
+                      ? "bg-red-500 hover:bg-red-600"
+                      : "bg-green-500 hover:bg-green-600"
+                  } text-white transition-colors duration-200`}
+                  size="sm"
+                  title={isListening ? "Stop listening" : "Start voice input"}
+                >
+                  {isListening ? (
+                    <MicOff className="w-3 lg:w-4 h-3 lg:h-4" />
+                  ) : (
+                    <Mic className="w-3 lg:w-4 h-3 lg:h-4" />
+                  )}
+                </Button>
+              )}
+
+              {/* Send Button */}
               <Button
-                onClick={handleSendMessage}
-                disabled={!inputText.trim() || isLoading || !isConfigured}
+                onClick={() => handleSendMessage()}
+                disabled={
+                  !inputText.trim() || isLoading || !isConfigured || isListening
+                }
                 className="bg-gradient-to-r from-blue-600 to-blue-700 text-white"
                 size="sm"
               >
                 <Send className="w-3 lg:w-4 h-3 lg:h-4" />
               </Button>
             </div>
+
+            {/* Speech recognition status */}
+            {!speechSupported && (
+              <p className="text-xs text-gray-500 mt-2">
+                Voice input not supported in this browser
+              </p>
+            )}
+            {isListening && (
+              <p className="text-xs text-blue-600 mt-2 animate-pulse">
+                🎤 Listening... Speak now
+              </p>
+            )}
           </div>
         </>
       )}
     </Card>
   );
+};
+
+// Add type declarations for Speech Recognition API
+declare global {
+  interface Window {
+    SpeechRecognition: typeof SpeechRecognition;
+    webkitSpeechRecognition: typeof SpeechRecognition;
+  }
+}
+
+interface SpeechRecognition extends EventTarget {
+  continuous: boolean;
+  interimResults: boolean;
+  lang: string;
+  start(): void;
+  stop(): void;
+  abort(): void;
+  onstart: ((this: SpeechRecognition, ev: Event) => any) | null;
+  onresult:
+    | ((this: SpeechRecognition, ev: SpeechRecognitionEvent) => any)
+    | null;
+  onerror:
+    | ((this: SpeechRecognition, ev: SpeechRecognitionErrorEvent) => any)
+    | null;
+  onend: ((this: SpeechRecognition, ev: Event) => any) | null;
+}
+
+interface SpeechRecognitionEvent extends Event {
+  results: SpeechRecognitionResultList;
+}
+
+interface SpeechRecognitionErrorEvent extends Event {
+  error: string;
+}
+
+interface SpeechRecognitionResultList {
+  [index: number]: SpeechRecognitionResult;
+  length: number;
+}
+
+interface SpeechRecognitionResult {
+  [index: number]: SpeechRecognitionAlternative;
+  length: number;
+}
+
+interface SpeechRecognitionAlternative {
+  transcript: string;
+  confidence: number;
+}
+
+declare var SpeechRecognition: {
+  prototype: SpeechRecognition;
+  new (): SpeechRecognition;
 };
 
 export default AIGuide;
