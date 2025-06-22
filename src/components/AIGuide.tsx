@@ -12,9 +12,12 @@ import {
   Maximize2,
   Mic,
   MicOff,
+  Volume2,
+  VolumeX,
 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { GoogleGenerativeAI } from "@google/generative-ai";
+import { allData } from "@/data/placeholderData";
 
 const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
 let genAI: GoogleGenerativeAI | null = null;
@@ -34,7 +37,9 @@ const AIGuide = () => {
   const [isOpen, setIsOpen] = useState(false);
   const [isMinimized, setIsMinimized] = useState(false);
   const [isListening, setIsListening] = useState(false);
+  const [isSpeaking, setIsSpeaking] = useState(false);
   const [speechSupported, setSpeechSupported] = useState(false);
+  const [ttsSupported, setTtsSupported] = useState(false);
   const recognitionRef = useRef<SpeechRecognition | null>(null);
 
   const isConfigured = useMemo(() => !!apiKey, []);
@@ -43,7 +48,7 @@ const AIGuide = () => {
     {
       id: "1",
       text: isConfigured
-        ? "Hi! I'm your AI assistant, powered by Gemini. How can I help you today? You can type or use the microphone to speak!"
+        ? "Hi! I'm your AI assistant for your fencing business. I have access to all your quotes, customers, schedule, and projects data. How can I help you today? You can type or use the microphone to speak!"
         : "The AI chatbot is not configured. Please add the VITE_GEMINI_API_KEY to your .env file.",
       isUser: false,
       timestamp: new Date(),
@@ -52,8 +57,9 @@ const AIGuide = () => {
   const [inputText, setInputText] = useState("");
   const [isLoading, setIsLoading] = useState(false);
 
-  // Initialize speech recognition
+  // Initialize speech recognition and text-to-speech
   useEffect(() => {
+    // Speech Recognition
     if ("webkitSpeechRecognition" in window || "SpeechRecognition" in window) {
       setSpeechSupported(true);
       const SpeechRecognition =
@@ -72,7 +78,6 @@ const AIGuide = () => {
         recognitionRef.current.onresult = (event) => {
           const transcript = event.results[0][0].transcript;
           setInputText(transcript);
-          // Automatically send the message after getting the transcript
           setTimeout(() => {
             handleSendMessage(transcript);
           }, 100);
@@ -98,9 +103,17 @@ const AIGuide = () => {
       }
     }
 
+    // Text-to-Speech
+    if ("speechSynthesis" in window) {
+      setTtsSupported(true);
+    }
+
     return () => {
       if (recognitionRef.current) {
         recognitionRef.current.abort();
+      }
+      if (window.speechSynthesis) {
+        window.speechSynthesis.cancel();
       }
     };
   }, []);
@@ -128,6 +141,31 @@ const AIGuide = () => {
     }
   };
 
+  const speakText = (text: string) => {
+    if (window.speechSynthesis && ttsSupported) {
+      // Cancel any ongoing speech
+      window.speechSynthesis.cancel();
+
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.rate = 0.9;
+      utterance.pitch = 1;
+      utterance.volume = 0.8;
+
+      utterance.onstart = () => setIsSpeaking(true);
+      utterance.onend = () => setIsSpeaking(false);
+      utterance.onerror = () => setIsSpeaking(false);
+
+      window.speechSynthesis.speak(utterance);
+    }
+  };
+
+  const stopSpeaking = () => {
+    if (window.speechSynthesis) {
+      window.speechSynthesis.cancel();
+      setIsSpeaking(false);
+    }
+  };
+
   const handleSendMessage = async (messageText?: string) => {
     const textToSend = messageText || inputText;
     if (!textToSend.trim() || !genAI) return;
@@ -149,31 +187,98 @@ const AIGuide = () => {
       const model = genAI.getGenerativeModel({
         model: "gemini-1.5-flash",
         generationConfig: {
-          response_mime_type: "application/json",
+          responseMimeType: "application/json",
         },
       });
 
-      const prompt = `You are a helpful assistant for a fencing contractor app. Your goal is to help users.
-      The available pages are: dashboard, quotes, customers, schedule, and settings.
-      Based on the user's question, provide a response in JSON format. The object should have one of two keys: "navigation" (e.g., "/quotes") or "text" for a helpful response.
-      User question: "${textToSend}"`;
+      const prompt = `You are a helpful AI assistant for a fencing contractor business. You have access to all the business data including quotes, customers, schedule, and projects.
+
+Current Business Data:
+${JSON.stringify(allData, null, 2)}
+
+Based on the user's question and the business data above, provide a response in JSON format with the following structure:
+{
+  "navigation": "/route" (optional - only if user wants to navigate to a specific page),
+  "text": "your detailed response based on the actual business data",
+  "summary": "brief summary for voice reading",
+  "toHighlight": "ID of the specific item to highlight" (optional - include only if referring to a specific quote, customer, schedule item, or project by ID)
+}
+
+Available pages and their exact routes:
+- Dashboard: "/dashboard"
+- Quotes: "/quotes" 
+- Customers: "/customers"
+- Schedule: "/schedule"
+- Settings: "/settings"
+
+User question: "${textToSend}"
+
+Important: 
+- Use the actual data from the business to provide specific, helpful responses
+- If asked about quotes, customers, schedule, or projects, reference the actual data
+- Provide specific numbers, names, and details from the data
+- Make the response conversational and helpful
+- The "summary" should be a shorter version suitable for text-to-speech
+- If you mention a specific item (like "your most recent quote", "John Smith's project", etc.), include its ID in "toHighlight"
+- For navigation, use the EXACT route format with leading slash (e.g., "/quotes", "/customers")
+- Examples of when to use navigation:
+  * "Show me my quotes" -> "navigation": "/quotes"
+  * "Take me to customers" -> "navigation": "/customers"
+  * "Go to schedule" -> "navigation": "/schedule"
+- Examples of when to use toHighlight:
+  * "Which is my most recent quote?" -> include the quote ID
+  * "Show me John Smith's information" -> include customer ID
+  * "What's my next appointment?" -> include schedule ID`;
 
       const result = await model.generateContent(prompt);
       const response = await result.response;
       const text = response.text();
 
-      const parsedResponse = JSON.parse(text);
+      let parsedResponse;
+      try {
+        parsedResponse = JSON.parse(text);
+      } catch (parseError) {
+        // Fallback if JSON parsing fails
+        parsedResponse = {
+          text: text,
+          summary: text,
+        };
+      }
 
       let aiResponse = "I'm not sure how to help with that. Please try again.";
+      let speechText = aiResponse;
 
       if (parsedResponse.navigation) {
-        aiResponse = `Sure, taking you to the ${parsedResponse.navigation.replace(
-          "/",
-          ""
-        )} page.`;
-        setTimeout(() => navigate(parsedResponse.navigation), 1500);
+        // Ensure navigation route starts with "/"
+        let navigationRoute = parsedResponse.navigation;
+        if (!navigationRoute.startsWith("/")) {
+          navigationRoute = `/${navigationRoute}`;
+        }
+
+        aiResponse =
+          parsedResponse.text ||
+          `Taking you to the ${navigationRoute.replace("/", "")} page.`;
+        speechText = parsedResponse.summary || aiResponse;
+
+        // Handle highlighting if specified
+        if (parsedResponse.toHighlight) {
+          // Store the highlight ID in sessionStorage for the target page
+          sessionStorage.setItem("highlightId", parsedResponse.toHighlight);
+        }
+
+        setTimeout(() => navigate(navigationRoute), 2000);
       } else if (parsedResponse.text) {
         aiResponse = parsedResponse.text;
+        speechText = parsedResponse.summary || parsedResponse.text;
+
+        // Handle highlighting on current page
+        if (parsedResponse.toHighlight) {
+          // Trigger highlighting event
+          const highlightEvent = new CustomEvent("highlightItem", {
+            detail: { id: parsedResponse.toHighlight },
+          });
+          window.dispatchEvent(highlightEvent);
+        }
       }
 
       const aiMessage: Message = {
@@ -183,6 +288,11 @@ const AIGuide = () => {
         timestamp: new Date(),
       };
       setMessages((prev) => [...prev, aiMessage]);
+
+      // Automatically speak the response
+      setTimeout(() => {
+        speakText(speechText);
+      }, 500);
     } catch (error) {
       console.error("AI Guide error:", error);
       const errorMessage: Message = {
@@ -212,7 +322,7 @@ const AIGuide = () => {
           className="w-16 h-16 rounded-full bg-gradient-to-r from-blue-600 to-blue-700 text-white shadow-lg hover:shadow-xl hover:scale-110 transition-all duration-300 flex flex-col items-center justify-center p-2"
         >
           <MessageCircle className="w-6 h-6 mb-1" />
-          <span className="text-xs font-medium">Chatbot</span>
+          <span className="text-xs font-medium">AI Chat</span>
         </Button>
       </div>
     );
@@ -224,15 +334,41 @@ const AIGuide = () => {
       <div className="flex items-center justify-between p-3 lg:p-4 border-b border-gray-200 bg-gradient-to-r from-blue-600 to-blue-700 text-white rounded-t-lg">
         <div className="flex items-center space-x-2">
           <Bot className="w-4 lg:w-5 h-4 lg:h-5" />
-          <span className="font-semibold text-sm lg:text-base">AI Chatbot</span>
-          {isListening && (
-            <div className="flex items-center space-x-1">
-              <div className="w-2 h-2 bg-red-400 rounded-full animate-pulse"></div>
-              <span className="text-xs">Listening...</span>
-            </div>
-          )}
+          <span className="font-semibold text-sm lg:text-base">
+            Business AI
+          </span>
+          <div className="flex items-center space-x-1">
+            {isListening && (
+              <div className="flex items-center space-x-1">
+                <div className="w-2 h-2 bg-red-400 rounded-full animate-pulse"></div>
+                <span className="text-xs">Listening</span>
+              </div>
+            )}
+            {isSpeaking && (
+              <div className="flex items-center space-x-1">
+                <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse"></div>
+                <span className="text-xs">Speaking</span>
+              </div>
+            )}
+          </div>
         </div>
         <div className="flex items-center space-x-1 lg:space-x-2">
+          {/* TTS Control */}
+          {ttsSupported && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={isSpeaking ? stopSpeaking : undefined}
+              className="text-white hover:bg-white/20 p-1"
+              disabled={!isSpeaking}
+            >
+              {isSpeaking ? (
+                <VolumeX className="w-3 lg:w-4 h-3 lg:h-4" />
+              ) : (
+                <Volume2 className="w-3 lg:w-4 h-3 lg:h-4" />
+              )}
+            </Button>
+          )}
           <Button
             variant="ghost"
             size="sm"
@@ -273,7 +409,7 @@ const AIGuide = () => {
                   </div>
                 )}
                 <div
-                  className={`max-w-[70%] p-2 lg:p-3 rounded-lg ${
+                  className={`max-w-[80%] p-2 lg:p-3 rounded-lg ${
                     message.isUser
                       ? "bg-blue-600 text-white"
                       : "bg-gray-100 text-gray-800"
@@ -282,6 +418,16 @@ const AIGuide = () => {
                   <p className="text-xs lg:text-sm whitespace-pre-line">
                     {message.text}
                   </p>
+                  {!message.isUser && ttsSupported && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => speakText(message.text)}
+                      className="mt-2 p-1 h-6 text-gray-600 hover:text-gray-800"
+                    >
+                      <Volume2 className="w-3 h-3" />
+                    </Button>
+                  )}
                 </div>
                 {message.isUser && (
                   <div className="w-6 lg:w-8 h-6 lg:h-8 rounded-full bg-gray-300 flex items-center justify-center flex-shrink-0">
@@ -323,7 +469,7 @@ const AIGuide = () => {
                   isConfigured
                     ? isListening
                       ? "Listening..."
-                      : "Ask me anything..."
+                      : "Ask about quotes, customers, schedule..."
                     : "Chatbot not configured"
                 }
                 className="flex-1 text-sm"
@@ -364,17 +510,23 @@ const AIGuide = () => {
               </Button>
             </div>
 
-            {/* Speech recognition status */}
-            {!speechSupported && (
-              <p className="text-xs text-gray-500 mt-2">
-                Voice input not supported in this browser
-              </p>
-            )}
-            {isListening && (
-              <p className="text-xs text-blue-600 mt-2 animate-pulse">
-                🎤 Listening... Speak now
-              </p>
-            )}
+            {/* Status indicators */}
+            <div className="mt-2 text-xs text-gray-500 space-y-1">
+              {!speechSupported && (
+                <p>Voice input not supported in this browser</p>
+              )}
+              {!ttsSupported && (
+                <p>Text-to-speech not supported in this browser</p>
+              )}
+              {isListening && (
+                <p className="text-blue-600 animate-pulse">
+                  🎤 Listening... Speak now
+                </p>
+              )}
+              {isSpeaking && (
+                <p className="text-green-600 animate-pulse">🔊 Speaking...</p>
+              )}
+            </div>
           </div>
         </>
       )}
